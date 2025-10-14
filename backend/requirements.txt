@@ -4,5 +4,5 @@ motor==3.6.0
 pydantic==2.9.2
 python-dotenv==1.0.1
 APScheduler==3.10.4
-playwright==1.47.2
+playwright==1.55.0
 requests==2.32.3
