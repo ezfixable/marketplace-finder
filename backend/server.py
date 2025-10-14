@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,11 +12,14 @@ from app.core.models import SearchRequest, AuthStatus
 from app.marketplace.scanner import (
     search_marketplace,
     has_session,
-    ensure_session_login,   # << добавлено
+    ensure_session_login,   # ручной логин через Playwright
 )
 from app.notifications.emailer import send_email
 from app.notifications.pushover import push
 
+# -----------------------------------------------------------------------------
+# Env & app setup
+# -----------------------------------------------------------------------------
 load_dotenv()
 MONGO_URL = os.getenv("MONGO_URL")
 PORT = int(os.getenv("PORT", "8001"))
@@ -24,7 +27,7 @@ PORT = int(os.getenv("PORT", "8001"))
 app = FastAPI(title="Marketplace Finder API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # при желании сузить до домена Vercel
+    allow_origins=["*"],   # при желании сузить до домена Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,7 +38,9 @@ db = client.mpf if client else None
 
 scheduler = AsyncIOScheduler()
 
-
+# -----------------------------------------------------------------------------
+# Lifecycle
+# -----------------------------------------------------------------------------
 @app.on_event("startup")
 async def on_start():
     try:
@@ -43,18 +48,22 @@ async def on_start():
     except Exception:
         pass
 
-
+# -----------------------------------------------------------------------------
+# Health
+# -----------------------------------------------------------------------------
 @app.get("/api/health")
 async def health():
     return {"ok": True, "time": datetime.utcnow().isoformat()}
 
-
-# ------------- НОВОЕ: ручной логин Facebook через Playwright -------------
-@app.post("/api/auth/facebook/login")
-async def fb_login():
+# -----------------------------------------------------------------------------
+# Facebook Auth (GET/POST to be clickable from browser)
+# -----------------------------------------------------------------------------
+@app.api_route("/api/auth/facebook/login", methods=["GET", "POST"])
+async def fb_login(request: Request):
     """
     Тригерит Playwright-логин по FB_EMAIL/FB_PASSWORD и сохраняет cookie-сессию.
-    Возвращает 200 всегда (с пояснением), чтобы фронт мог показать сообщение.
+    Работает и по GET (удобно из браузера), и по POST.
+    Возвращает 200 всегда, чтобы фронт мог показать сообщение пользователю.
     """
     ok = ensure_session_login()
     if not ok:
@@ -63,18 +72,21 @@ async def fb_login():
             "message": "Login failed. Check FB_EMAIL/FB_PASSWORD or 2FA.",
         }
     return {"authenticated": True, "message": "Login successful. Session saved."}
-# ------------------------------------------------------------------------
-
 
 @app.get("/api/auth/facebook/status", response_model=AuthStatus)
 async def fb_status():
     return AuthStatus(
         authenticated=has_session(),
-        message="Logged in (session found)" if has_session() else "Not authenticated. Run Playwright login once on the backend.",
+        message=(
+            "Logged in (session found)"
+            if has_session()
+            else "Not authenticated. Run Playwright login once on the backend."
+        ),
     )
 
-
-# ------------- ОБНОВЛЕНО: поиск не роняет сервер (нет 500) ---------------
+# -----------------------------------------------------------------------------
+# Search (never throws 500)
+# -----------------------------------------------------------------------------
 @app.post("/api/search")
 async def api_search(payload: SearchRequest):
     """
@@ -91,16 +103,16 @@ async def api_search(payload: SearchRequest):
             "query": payload.query or "",
             "error": str(e),
         }
-# ------------------------------------------------------------------------
 
-
+# -----------------------------------------------------------------------------
+# Saved searches (Mongo)
+# -----------------------------------------------------------------------------
 @app.get("/api/saved")
 async def saved_all():
     if not db:
         return []
     cur = db.saved_searches.find().sort("created_at", -1)
     return [{**x, "_id": str(x.get("_id"))} async for x in cur]
-
 
 @app.post("/api/saved")
 async def saved_create(body: Dict[str, Any]):
@@ -117,13 +129,11 @@ async def saved_create(body: Dict[str, Any]):
     doc["_id"] = str(res.inserted_id)
     return doc
 
-
 @app.patch("/api/saved/{sid}/notifications")
 async def saved_patch(sid: str, body: Dict[str, Any]):
     if not db:
         raise HTTPException(500, "Mongo not configured")
     from bson import ObjectId
-
     await db.saved_searches.update_one(
         {"_id": ObjectId(sid)},
         {"$set": {f"notifications.{k}": v for k, v in body.items()}},
@@ -131,18 +141,17 @@ async def saved_patch(sid: str, body: Dict[str, Any]):
     doc = await db.saved_searches.find_one({"_id": ObjectId(sid)})
     return doc.get("notifications", {})
 
-
 @app.delete("/api/saved/{sid}")
 async def saved_delete(sid: str):
     if not db:
         raise HTTPException(500, "Mongo not configured")
     from bson import ObjectId
-
     await db.saved_searches.delete_one({"_id": ObjectId(sid)})
     return {"ok": True}
 
-
-# --------- пример фоновой задачи: дергает сохранённые поиски -------------
+# -----------------------------------------------------------------------------
+# Periodic notifications example
+# -----------------------------------------------------------------------------
 @scheduler.scheduled_job("interval", minutes=10)
 async def periodic_scan():
     if not db:
@@ -154,7 +163,10 @@ async def periodic_scan():
                 title = items[0]["title"]
                 push("Marketplace Finder", f"New item: {title}")
                 # email опционален, только если настроены SMTP env
-                send_email(os.getenv("SMTP_USER") or "you@example.com", "New Marketplace item", title)
+                send_email(
+                    os.getenv("SMTP_USER") or "you@example.com",
+                    "New Marketplace item",
+                    title,
+                )
         except Exception as e:
             print(f"[periodic_scan error] {e}")
-# ------------------------------------------------------------------------
