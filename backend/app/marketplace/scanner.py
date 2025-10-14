@@ -1,10 +1,10 @@
 import os
 from datetime import datetime
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 SESSION_FILE = "/tmp/fb_context.json"
-FB_BASE = "https://m.facebook.com"  # mobile is simpler/stabler on headless
+FB_BASE = "https://m.facebook.com"  # mobile DOM проще для headless
 MARKETPLACE_SEARCH = "https://m.facebook.com/marketplace/?query={q}"
 
 LAUNCH_ARGS = [
@@ -15,62 +15,75 @@ LAUNCH_ARGS = [
 ]
 
 def _launch(p):
-    # headless Chromium with flags that work well on Render
+    # headless Chromium с флагами, подходящими для Render
     browser = p.chromium.launch(headless=True, args=LAUNCH_ARGS)
     return browser
 
 def _new_context(browser):
+    # если сессия уже есть — используем
     if os.path.exists(SESSION_FILE):
         return browser.new_context(storage_state=SESSION_FILE)
     return browser.new_context()
 
 def ensure_session_login() -> bool:
     """
-    Tries to ensure a logged-in storage_state exists. Returns True on success.
-    Uses FB_EMAIL/FB_PASSWORD env vars for first login only.
+    Пытается создать сохранённую сессию (storage_state) на основе FB_EMAIL/FB_PASSWORD.
+    Никогда не бросает исключения, возвращает True/False.
     """
-    email = os.getenv("FB_EMAIL", "")
-    password = os.getenv("FB_PASSWORD", "")
-    if os.path.exists(SESSION_FILE):
-        return True
-    if not email or not password:
-        # no creds provided -> cannot login
-        return False
-
-    with sync_playwright() as p:
-        browser = _launch(p)
-        context = browser.new_context()
-        page = context.new_page()
-        try:
-            page.goto(f"{FB_BASE}/login", wait_until="domcontentloaded", timeout=30000)
-            page.fill('input[name="email"]', email)
-            page.fill('input[name="pass"]', password)
-            # m.facebook.com uses button[name=login] or form submit
-            # try both to be safe
-            try:
-                page.click('button[name="login"]', timeout=5000)
-            except PWTimeout:
-                page.keyboard.press("Enter")
-
-            # wait for either home or marketplace nav (auth complete)
-            page.wait_for_load_state("networkidle", timeout=30000)
-            # simple heuristic: after login we'll have a c_user cookie
-            context.storage_state(path=SESSION_FILE)
-            browser.close()
+    try:
+        # если уже вошли раньше — ок
+        if os.path.exists(SESSION_FILE):
             return True
-        except Exception as e:
-            print(f"[FB LOGIN ERROR] {e}")
-            browser.close()
+
+        email = os.getenv("FB_EMAIL") or ""
+        password = os.getenv("FB_PASSWORD") or ""
+        if not email or not password:
+            # нет кредов — не сможем войти
             return False
+
+        with sync_playwright() as p:
+            browser = _launch(p)
+            context = browser.new_context()
+            page = context.new_page()
+            try:
+                page.goto(f"{FB_BASE}/login", wait_until="domcontentloaded", timeout=30000)
+                page.fill('input[name="email"]', email)
+                page.fill('input[name="pass"]', password)
+                # на m.facebook.com обычно работает эта кнопка; на всякий – Enter
+                try:
+                    page.click('button[name="login"]', timeout=5000)
+                except PWTimeout:
+                    page.keyboard.press("Enter")
+
+                # ждём сетевую тишину / перенаправления после логина
+                page.wait_for_load_state("networkidle", timeout=30000)
+
+                # простая эвристика: если дошли сюда – сохраним состояние
+                try:
+                    context.storage_state(path=SESSION_FILE)
+                except Exception:
+                    pass
+
+                browser.close()
+                return os.path.exists(SESSION_FILE)
+            except Exception:
+                # на любом сбое аккуратно закрываем
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                return False
+    except Exception:
+        return False
 
 def has_session() -> bool:
     return os.path.exists(SESSION_FILE)
 
 def search_marketplace(query: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Returns a list of listings; never raises to caller (server will not 500).
+    Возвращает список объявлений. Внутри полностью безопасно (без raise наружу).
     """
-    # Ensure session exists (will be no-op if SESSION_FILE already there)
+    # Создадим сессию при необходимости (вернёт False, если не получилось — тогда FB покажет публичный вид без персонализации)
     _ = ensure_session_login()
 
     try:
@@ -81,7 +94,7 @@ def search_marketplace(query: str, filters: Dict[str, Any]) -> List[Dict[str, An
             url = MARKETPLACE_SEARCH.format(q=(query or "").strip())
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # Try to wait for cards; on m-dot they can be 'article' or list items
+            # Подождём появление карточек, но не критично
             try:
                 page.wait_for_selector("article, div[role='article']", timeout=15000)
             except PWTimeout:
@@ -95,7 +108,6 @@ def search_marketplace(query: str, filters: Dict[str, Any]) -> List[Dict[str, An
                     title_el = card.query_selector("span, strong")
                     title = (title_el.inner_text().strip() if title_el else "Listing")
 
-                    # price: look for $ in text
                     price_el = card.query_selector("span:has-text('$')")
                     price = 0.0
                     if price_el:
@@ -125,13 +137,17 @@ def search_marketplace(query: str, filters: Dict[str, Any]) -> List[Dict[str, An
                 except Exception:
                     continue
 
-            # persist latest cookies
+            # сохраняем текущее состояние cookies, если удалось
             try:
                 context.storage_state(path=SESSION_FILE)
             except Exception:
                 pass
-            browser.close()
+
+            try:
+                browser.close()
+            except Exception:
+                pass
+
             return items
-    except Exception as e:
-        print(f"[SEARCH ERROR] {e}")
+    except Exception:
         return []
