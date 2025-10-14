@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { overflow-x: hidden; width: 100%; max-width: 100vw; }
+* { box-sizing: border-box; }
+
+.button-primary { @apply bg-primary text-white font-semibold rounded-xl px-5 py-3 hover:opacity-90 transition; }
+.card { @apply rounded-2xl border; }
+input, select { @apply rounded-xl border px-3 py-2; }
