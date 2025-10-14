@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from app.core.models import SearchRequest, AuthStatus
-from app.marketplace.scanner import search_marketplace, has_session
+ffrom app.marketplace.scanner import search_marketplace, has_session, ensure_session_login
 from app.notifications.emailer import send_email
 from app.notifications.pushover import push
 
