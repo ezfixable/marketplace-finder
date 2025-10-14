@@ -1,6 +1,7 @@
 import os
+import json
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,10 +13,13 @@ from app.core.models import SearchRequest, AuthStatus
 from app.marketplace.scanner import (
     search_marketplace,
     has_session,
-    ensure_session_login,   # ручной логин через Playwright
+    ensure_session_login,  # может не сработать при 2FA
 )
+
 from app.notifications.emailer import send_email
 from app.notifications.pushover import push
+
+SESSION_FILE = "/tmp/fb_context.json"
 
 # -----------------------------------------------------------------------------
 # Env & app setup
@@ -27,7 +31,7 @@ PORT = int(os.getenv("PORT", "8001"))
 app = FastAPI(title="Marketplace Finder API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # при желании сузить до домена Vercel
+    allow_origins=["*"],   # сузить при желании до домена Vercel
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,20 +60,19 @@ async def health():
     return {"ok": True, "time": datetime.utcnow().isoformat()}
 
 # -----------------------------------------------------------------------------
-# Facebook Auth (GET/POST to be clickable from browser)
+# Facebook Auth: GET/POST login (может не сработать при 2FA)
 # -----------------------------------------------------------------------------
 @app.api_route("/api/auth/facebook/login", methods=["GET", "POST"])
 async def fb_login(request: Request):
-    """
-    Тригерит Playwright-логин по FB_EMAIL/FB_PASSWORD и сохраняет cookie-сессию.
-    Работает и по GET (удобно из браузера), и по POST.
-    Возвращает 200 всегда, чтобы фронт мог показать сообщение пользователю.
-    """
-    ok = ensure_session_login()
+    ok = False
+    try:
+        ok = ensure_session_login()
+    except Exception as e:
+        print(f"[fb_login ERROR] {e}")
     if not ok:
         return {
             "authenticated": False,
-            "message": "Login failed. Check FB_EMAIL/FB_PASSWORD or 2FA.",
+            "message": "Login failed (FB_EMAIL/FB_PASSWORD or 2FA/Checkpoint). Prefer cookies upload.",
         }
     return {"authenticated": True, "message": "Login successful. Session saved."}
 
@@ -80,19 +83,101 @@ async def fb_status():
         message=(
             "Logged in (session found)"
             if has_session()
-            else "Not authenticated. Run Playwright login once on the backend."
+            else "Not authenticated. Upload cookies or run login."
         ),
     )
+
+# -----------------------------------------------------------------------------
+# Facebook Auth via COOKIES (рекомендуется при 2FA)
+# -----------------------------------------------------------------------------
+def _normalize_cookies_to_storage_state(raw: Union[List[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Принимает либо:
+      - список cookie объектов (как экспортируют расширения типа EditThisCookie),
+      - либо объект со структурой {"cookies": [...]}.
+    Возвращает storage_state формата Playwright: {"cookies":[...], "origins":[]}
+    """
+    if isinstance(raw, dict) and "cookies" in raw and isinstance(raw["cookies"], list):
+        cookies_in = raw["cookies"]
+    elif isinstance(raw, list):
+        cookies_in = raw
+    else:
+        raise ValueError("Invalid cookies payload; must be list or {'cookies': [...]}")
+
+    cookies_out = []
+    for c in cookies_in:
+        try:
+            name = c.get("name") or c.get("Name") or c.get("key")
+            value = c.get("value") or c.get("Value")
+            domain = c.get("domain") or c.get("Domain")
+            path = c.get("path") or c.get("Path") or "/"
+            expires = c.get("expires") or c.get("expirationDate") or None
+            httpOnly = bool(c.get("httpOnly") or c.get("HttpOnly") or c.get("http_only") or False)
+            secure = bool(c.get("secure") or c.get("Secure") or False)
+            sameSite = c.get("sameSite") or c.get("SameSite") or "Lax"
+
+            # Пропускаем пустые/битые
+            if not (name and value and domain):
+                continue
+
+            # Приведём sameSite к ожидаемым значениям
+            samesite_map = {"lax": "Lax", "strict": "Strict", "none": "None"}
+            ss = samesite_map.get(str(sameSite).lower(), "Lax")
+
+            cookie = {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "httpOnly": httpOnly,
+                "secure": secure,
+                "sameSite": ss,
+            }
+            if expires is not None:
+                try:
+                    cookie["expires"] = int(expires)
+                except Exception:
+                    pass
+
+            cookies_out.append(cookie)
+        except Exception:
+            continue
+
+    return {"cookies": cookies_out, "origins": []}
+
+@app.post("/api/auth/facebook/cookies")
+async def fb_upload_cookies(body: Any):
+    """
+    Принимает cookies JSON (список или объект с ключом 'cookies') и сохраняет
+    Playwright storage_state в SESSION_FILE. После этого статус станет authenticated:true.
+    """
+    try:
+        # FastAPI уже парсит JSON; если пришла строка — попробуем распарсить вручную
+        payload = body
+        if isinstance(body, str):
+            payload = json.loads(body)
+
+        storage_state = _normalize_cookies_to_storage_state(payload)
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(storage_state, f)
+        return {"authenticated": True, "saved": True, "cookies": len(storage_state.get("cookies", []))}
+    except Exception as e:
+        return {"authenticated": False, "saved": False, "error": str(e)}
+
+@app.post("/api/auth/facebook/clear")
+async def fb_clear_session():
+    try:
+        if os.path.exists(SESSION_FILE):
+            os.remove(SESSION_FILE)
+        return {"ok": True, "message": "Session cleared."}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 # -----------------------------------------------------------------------------
 # Search (never throws 500)
 # -----------------------------------------------------------------------------
 @app.post("/api/search")
 async def api_search(payload: SearchRequest):
-    """
-    Выполняет поиск на FB Marketplace. Любая ошибка -> пустой результат,
-    чтобы не было 500 и фронт не падал.
-    """
     try:
         items = search_marketplace(payload.query or "", payload.model_dump())
         return {"listings": items, "total": len(items), "query": payload.query or ""}
@@ -162,7 +247,6 @@ async def periodic_scan():
             if items:
                 title = items[0]["title"]
                 push("Marketplace Finder", f"New item: {title}")
-                # email опционален, только если настроены SMTP env
                 send_email(
                     os.getenv("SMTP_USER") or "you@example.com",
                     "New Marketplace item",
