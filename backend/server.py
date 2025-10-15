@@ -10,16 +10,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.core.models import SearchRequest, AuthStatus
-from app.marketplace.scanner import (
-    search_marketplace,
-    has_session,
-    ensure_session_login,  # может не сработать при 2FA
-)
-
+from app.marketplace.scanner import search_marketplace, has_session, ensure_session_login
 from app.notifications.emailer import send_email
 from app.notifications.pushover import push
 
-SESSION_FILE = "/tmp/fb_context.json"
+load_dotenv()
+MONGO_URL = os.getenv("MONGO_URL")
+PORT = int(os.getenv("PORT", "8001"))
+
+SESSION_FILE = "/tmp/fb_context.json"   # файл для Playwright
 
 # -----------------------------------------------------------------------------
 # Env & app setup
