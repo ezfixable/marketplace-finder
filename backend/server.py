@@ -145,24 +145,56 @@ def _normalize_cookies_to_storage_state(raw: Union[List[Dict[str, Any]], Dict[st
 
     return {"cookies": cookies_out, "origins": []}
 
+from fastapi import Request
+
 @app.post("/api/auth/facebook/cookies")
-async def fb_upload_cookies(body: Any):
+async def fb_upload_cookies(request: Request):
     """
-    Принимает cookies JSON (список или объект с ключом 'cookies') и сохраняет
-    Playwright storage_state в SESSION_FILE. После этого статус станет authenticated:true.
+    Принимает cookies JSON (список или объект с ключом 'cookies')
+    и сохраняет Playwright storage_state в SESSION_FILE.
+    После этого статус становится authenticated:true.
     """
     try:
-        # FastAPI уже парсит JSON; если пришла строка — попробуем распарсить вручную
-        payload = body
-        if isinstance(body, str):
-            payload = json.loads(body)
-
-        storage_state = _normalize_cookies_to_storage_state(payload)
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(storage_state, f)
-        return {"authenticated": True, "saved": True, "cookies": len(storage_state.get("cookies", []))}
+        # читаем тело запроса как JSON
+        payload = await request.json()
     except Exception as e:
-        return {"authenticated": False, "saved": False, "error": str(e)}
+        return {
+            "authenticated": False,
+            "saved": False,
+            "error": f"Bad JSON: {str(e)}"
+        }
+
+    try:
+        # поддерживаем как {"cookies": [...]} так и просто [...]
+        if isinstance(payload, dict) and "cookies" in payload:
+            cookies_list = payload["cookies"]
+        elif isinstance(payload, list):
+            cookies_list = payload
+        else:
+            return {
+                "authenticated": False,
+                "saved": False,
+                "error": "Invalid JSON format: expected 'cookies' key or list"
+            }
+
+        storage_state = {"cookies": cookies_list, "origins": []}
+
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(storage_state, f, ensure_ascii=False, indent=2)
+
+        return {
+            "authenticated": True,
+            "saved": True,
+            "cookies": len(cookies_list)
+        }
+
+    except Exception as e:
+        return {
+            "authenticated": False,
+            "saved": False,
+            "error": str(e)
+        }
+
 
 @app.post("/api/auth/facebook/clear")
 async def fb_clear_session():
