@@ -106,14 +106,15 @@ async def fb_login(request: Request):
 
 @app.get("/api/auth/facebook/status", response_model=AuthStatus)
 async def fb_status():
+    # Если файл сессии исчез (после рестарта), пробуем восстановить его из MongoDB
+    if not has_session():
+        await restore_session_from_db()
     return AuthStatus(
         authenticated=has_session(),
-        message=(
-            "Logged in (session found)"
-            if has_session()
-            else "Not authenticated. Upload cookies or run login."
-        ),
+        message=("Logged in (session found)" if has_session()
+                 else "Not authenticated. Upload cookies or run login.")
     )
+
 
 # -----------------------------------------------------------------------------
 # Facebook Auth via COOKIES (рекомендуется при 2FA)
@@ -175,53 +176,90 @@ def _normalize_cookies_to_storage_state(raw: Union[List[Dict[str, Any]], Dict[st
 
 from fastapi import Request
 
+from fastapi import Request
+from typing import Union, List, Dict, Any
+
+def _normalize_cookies_to_storage_state(raw: Union[List[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Принимает либо список cookie-объектов, либо {"cookies":[...]}.
+    Возвращает storage_state формата Playwright: {"cookies":[...], "origins":[]}
+    """
+    if isinstance(raw, dict) and "cookies" in raw and isinstance(raw["cookies"], list):
+        cookies_in = raw["cookies"]
+    elif isinstance(raw, list):
+        cookies_in = raw
+    else:
+        raise ValueError("Invalid cookies payload; expected list or {'cookies': [...]}")
+
+    cookies_out = []
+    for c in cookies_in:
+        try:
+            name = c.get("name") or c.get("Name") or c.get("key")
+            value = c.get("value") or c.get("Value")
+            domain = c.get("domain") or c.get("Domain")
+            path = c.get("path") or c.get("Path") or "/"
+            httpOnly = bool(c.get("httpOnly") or c.get("HttpOnly") or c.get("http_only") or False)
+            secure = bool(c.get("secure") or c.get("Secure") or False)
+            sameSite = c.get("sameSite") or c.get("SameSite") or "Lax"
+            expires = c.get("expires") or c.get("expirationDate")
+
+            if not (name and value and domain):
+                continue
+
+            samesite_map = {"lax": "Lax", "strict": "Strict", "none": "None"}
+            ss = samesite_map.get(str(sameSite).lower(), "Lax")
+
+            cookie = {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "httpOnly": httpOnly,
+                "secure": secure,
+                "sameSite": ss,
+            }
+            if expires is not None:
+                try:
+                    cookie["expires"] = int(expires)
+                except Exception:
+                    pass
+
+            cookies_out.append(cookie)
+        except Exception:
+            continue
+
+    return {"cookies": cookies_out, "origins": []}
+
 @app.post("/api/auth/facebook/cookies")
 async def fb_upload_cookies(request: Request):
     """
-    Принимает cookies JSON (список или объект с ключом 'cookies')
-    и сохраняет Playwright storage_state в SESSION_FILE.
-    После этого статус становится authenticated:true.
+    Принимает cookies JSON, сохраняет в файл для Playwright и дублирует в MongoDB
+    (коллекция 'sessions', документ _id="fb_storage_state").
     """
     try:
-        # читаем тело запроса как JSON
         payload = await request.json()
     except Exception as e:
-        return {
-            "authenticated": False,
-            "saved": False,
-            "error": f"Bad JSON: {str(e)}"
-        }
+        return {"authenticated": False, "saved": False, "error": f"Bad JSON: {e}"}
 
     try:
-        # поддерживаем как {"cookies": [...]} так и просто [...]
-        if isinstance(payload, dict) and "cookies" in payload:
-            cookies_list = payload["cookies"]
-        elif isinstance(payload, list):
-            cookies_list = payload
-        else:
-            return {
-                "authenticated": False,
-                "saved": False,
-                "error": "Invalid JSON format: expected 'cookies' key or list"
-            }
+        storage_state = _normalize_cookies_to_storage_state(payload)
 
-        storage_state = {"cookies": cookies_list, "origins": []}
-
+        # 1) Пишем файл (для Playwright)
+        os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(storage_state, f, ensure_ascii=False, indent=2)
+            json.dump(storage_state, f)
 
-        return {
-            "authenticated": True,
-            "saved": True,
-            "cookies": len(cookies_list)
-        }
+        # 2) Дублируем в MongoDB (переживёт рестарты/деплои)
+        if db:
+            await db.sessions.update_one(
+                {"_id": "fb_storage_state"},
+                {"$set": {"storage_state": storage_state, "updated_at": datetime.utcnow()}},
+                upsert=True,
+            )
 
+        return {"authenticated": True, "saved": True, "cookies": len(storage_state.get("cookies", []))}
     except Exception as e:
-        return {
-            "authenticated": False,
-            "saved": False,
-            "error": str(e)
-        }
+        return {"authenticated": False, "saved": False, "error": str(e)}
 
 
 @app.post("/api/auth/facebook/clear")
@@ -238,6 +276,8 @@ async def fb_clear_session():
 # -----------------------------------------------------------------------------
 @app.post("/api/search")
 async def api_search(payload: SearchRequest):
+    # Если файл сессии исчез, восстановим из Mongo перед поиском
+    await restore_session_from_db()
     try:
         items = search_marketplace(payload.query or "", payload.model_dump())
         return {"listings": items, "total": len(items), "query": payload.query or ""}
@@ -248,6 +288,7 @@ async def api_search(payload: SearchRequest):
             "query": payload.query or "",
             "error": str(e),
         }
+
 
 # -----------------------------------------------------------------------------
 # Saved searches (Mongo)
