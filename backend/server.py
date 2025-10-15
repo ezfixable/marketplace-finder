@@ -38,6 +38,35 @@ app.add_middleware(
 
 client = AsyncIOMotorClient(MONGO_URL) if MONGO_URL else None
 db = client.mpf if client else None
+async def restore_session_from_db() -> bool:
+    """
+    Если файл /tmp/fb_context.json отсутствует, пытается прочитать storage_state
+    из MongoDB (коллекция sessions, документ _id="fb_storage_state") и записать файл.
+    """
+    if os.path.exists(SESSION_FILE):
+        return True  # файл уже есть — ничего не делаем
+
+    if not db:
+        return False  # нет подключения к MongoDB — выходим
+
+    try:
+        # читаем из базы коллекцию sessions
+        doc = await db.sessions.find_one({"_id": "fb_storage_state"})
+        if not doc or "storage_state" not in doc:
+            return False
+
+        # создаём папку, если её нет
+        os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+
+        # записываем JSON в /tmp/fb_context.json
+        with open(SESSION_FILE, "w", encoding="utf-8") as f:
+            json.dump(doc["storage_state"], f)
+
+        return True  # успешно восстановили
+    except Exception as e:
+        print(f"[restore_session_from_db ERROR] {e}")
+        return False
+
 
 scheduler = AsyncIOScheduler()
 
