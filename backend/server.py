@@ -226,36 +226,62 @@ def _normalize_cookies_to_storage_state(raw: Union[List[Dict[str, Any]], Dict[st
 
     return {"cookies": cookies_out, "origins": []}
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
 @app.post("/api/auth/facebook/cookies")
-async def fb_upload_cookies(request: Request):
+async def upload_cookies(req: Request):
     """
-    Принимает cookies JSON, сохраняет в файл для Playwright и дублирует в MongoDB
-    (коллекция 'sessions', документ _id="fb_storage_state").
+    Принимает либо массив cookie-объектов, либо объект {"cookies":[...]}.
+    Сохраняет в Mongo (sessions/_id=fb_storage_state) и файл /tmp/fb_context.json.
     """
     try:
-        payload = await request.json()
+        payload = await req.json()
     except Exception as e:
-        return {"authenticated": False, "saved": False, "error": f"Bad JSON: {e}"}
+        return JSONResponse(
+            {"authenticated": False, "saved": False, "error": f"Bad JSON: {e}"},
+            status_code=400,
+        )
+
+    # Нормализуем вход
+    if isinstance(payload, list):
+        storage_state = {"cookies": payload}
+    elif isinstance(payload, dict) and "cookies" in payload and isinstance(payload["cookies"], list):
+        storage_state = {"cookies": payload["cookies"]}
+    else:
+        return JSONResponse(
+            {"authenticated": False, "saved": False, "error": "Payload must be an array of cookies or {\"cookies\": [...]}"},
+            status_code=400,
+        )
+
+    # Проверка подключения к базе
+    if db is None:
+        return JSONResponse(
+            {"authenticated": False, "saved": False, "error": "DB not configured (MONGO_URL missing?)"},
+            status_code=500,
+        )
 
     try:
-        storage_state = _normalize_cookies_to_storage_state(payload)
+        # Сохраняем cookies в MongoDB (upsert)
+        await db.sessions.update_one(
+            {"_id": "fb_storage_state"},
+            {"$set": {"_id": "fb_storage_state", "storage_state": storage_state}},
+            upsert=True,
+        )
 
-        # 1) Пишем файл (для Playwright)
+        # Создаём локальный файл /tmp/fb_context.json
         os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
         with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(storage_state, f)
+            json.dump(storage_state, f, ensure_ascii=False)
 
-        # 2) Дублируем в MongoDB (переживёт рестарты/деплои)
-        if db:
-            await db.sessions.update_one(
-                {"_id": "fb_storage_state"},
-                {"$set": {"storage_state": storage_state, "updated_at": datetime.utcnow()}},
-                upsert=True,
-            )
-
-        return {"authenticated": True, "saved": True, "cookies": len(storage_state.get("cookies", []))}
+        # Пробуем активировать сессию
+        ok = ensure_session_login()
+        return {"authenticated": bool(ok), "saved": True, "cookies": len(storage_state.get("cookies", []))}
     except Exception as e:
-        return {"authenticated": False, "saved": False, "error": str(e)}
+        return JSONResponse(
+            {"authenticated": False, "saved": False, "error": str(e)},
+            status_code=500,
+        )
 
 
 @app.post("/api/auth/facebook/clear")
