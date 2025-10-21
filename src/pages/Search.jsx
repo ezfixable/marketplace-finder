@@ -1,6 +1,23 @@
 import React, { useMemo, useState } from 'react'
 import Layout from '../components/Layout'
 
+const BASE = import.meta.env.VITE_BACKEND_URL || '';
+
+const apiSearch = (body) =>
+  fetch(`${BASE}/api/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    credentials: 'omit',
+  }).then(r => r.json()).catch(() => ({}));
+
+const apiSavedCreate = (payload) =>
+  fetch(`${BASE}/api/saved`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    credentials: 'omit',
+  }).then(r => r.json()).catch(() => ({}));
 
 const categories = [ 'Vehicles','Electronics','Property Rentals','Tools','Furniture','Appliances','Clothing','Pets','Miscellaneous' ]
 const conditions = ['Any','New','Like New','Good','Fair']
