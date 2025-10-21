@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import Layout from '../components/Layout'
-import { apiSearch, apiSavedCreate } from '../lib/api'
+
 
 const categories = [ 'Vehicles','Electronics','Property Rentals','Tools','Furniture','Appliances','Clothing','Pets','Miscellaneous' ]
 const conditions = ['Any','New','Like New','Good','Fair']
