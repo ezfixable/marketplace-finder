@@ -14,6 +14,7 @@ const asJson = async (res) => {
 // ===== AUTH / FACEBOOK =====
 export const apiStatus = () =>
   fetch(`${BASE}/api/auth/facebook/status`).then(asJson);
+export const getAuthStatus = apiStatus;
 
 export const apiUploadCookies = (cookiesJsonObjectOrArray) =>
   fetch(`${BASE}/api/auth/facebook/cookies`, {
