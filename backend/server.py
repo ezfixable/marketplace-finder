@@ -82,6 +82,15 @@ async def on_start():
 @app.get("/api/health")
 async def health():
     return {"ok": True, "time": datetime.utcnow().isoformat()}
+@app.get("/api/db/ping")
+async def db_ping():
+    if db is None:
+        return {"ok": False, "error": "DB not configured"}
+    try:
+        await db.command("ping")
+        return {"ok": True, "message": "Connected to MongoDB"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 # -----------------------------------------------------------------------------
 # Facebook Auth: GET/POST login (может не сработать при 2FA)
