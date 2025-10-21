@@ -47,7 +47,7 @@ export const apiSavedDelete = (id) =>
     method: 'DELETE',
   }).then(asJson);
 
-// ВОТ ЭТОГО ЭКСПОРТА НЕ ХВАТАЛО — добавляем
+// <<< ВАЖНО: добавляем отсутствующий экспорт
 export const apiSavedPatchNotif = (id, body) =>
   fetch(`${BASE}/api/saved/${encodeURIComponent(id)}/notifications`, {
     method: 'PATCH',
@@ -55,7 +55,7 @@ export const apiSavedPatchNotif = (id, body) =>
     body: JSON.stringify(body || {}),
   }).then(asJson);
 
-// ===== GLOBAL SETTINGS (если реализуешь на бэке) =====
+// ===== GLOBAL SETTINGS (если реализовано на бэке) =====
 export const apiSetGlobalNotify = (body) =>
   fetch(`${BASE}/api/settings/notifications`, {
     method: 'PATCH',
