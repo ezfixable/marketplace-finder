@@ -19,14 +19,10 @@ async function api(path, opts = {}) {
 export const getAuthStatus = () => api('/api/auth/facebook/status');
 
 // --- Search ---
-// Имя, которого ждут страницы:
 export const apiSearch = (body) =>
   api('/api/search', { method: 'POST', body: JSON.stringify(body) });
 
-// Синоним (если где-то использовалось другое имя):
-export const postSearch = apiSearch;
-
-// --- Saved searches (на будущее/если уже вызываются где-то) ---
+// --- Saved searches ---
 export const apiSavedCreate = (payload) =>
   api('/api/saved', { method: 'POST', body: JSON.stringify(payload) });
 
